@@ -621,15 +621,16 @@ class GatewaySessionCommandsMixin:
 
     async def _persist_manual_compression(self, tmp_agent, session_entry, source, compressed) -> None:
         """Commit a manual /compress result to the session store.  Rotation (new continuation id)
-        writes the compressed messages into the NEW session so the original stays searchable;
+        makes the NEW session durable (already published, else rewritten) so the original stays searchable;
         persist BEFORE repointing so a failed write is fatal and old history stays reachable.
         In-place compaction already archived + inserted rows, and a rewrite would DELETE the
         archive; an unchanged id without in-place means rotation FAILED."""
         new_session_id = tmp_agent.session_id
         if new_session_id != session_entry.session_id:
-            if not await self.async_session_store.rewrite_transcript(new_session_id, compressed):
-                raise RuntimeError(
-                    f"failed to persist compressed transcript for session {new_session_id}")
+            # Published child is already durable; a rewrite would drop rows cloned at publish.
+            if not await self.async_session_store.persist_rotated_compression_child(
+                    session_entry.session_id, new_session_id, compressed):
+                raise RuntimeError(f"failed to persist compressed transcript for session {new_session_id}")
             session_entry.session_id = new_session_id
             await self.async_session_store._save()
             await asyncio.to_thread(self._sync_telegram_topic_binding, source, session_entry,
