@@ -177,7 +177,11 @@ def _proxy_depth(stream) -> int:
     itself.
     """
     from agent.process_bootstrap import _SafeWriter
-    from hermes_logging import _RedactingStdio
+
+    try:  # older bases may not carry the redacting wrapper at all
+        from hermes_logging import _RedactingStdio
+    except ImportError:  # pragma: no cover
+        _RedactingStdio = ()  # type: ignore[assignment]
 
     depth = 0
     while depth < 10_000:
