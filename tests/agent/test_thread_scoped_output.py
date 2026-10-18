@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 
+import agent.process_bootstrap  # applies the Windows UTF-8 bootstrap at collection, not mid-test
 import agent.thread_scoped_output as thread_output
 from agent.thread_scoped_output import thread_scoped_silence
 
@@ -164,4 +165,60 @@ def test_silence_survives_redirect_restoring_an_older_proxy(monkeypatch):
         assert "must-stay-silenced" not in redirected.getvalue()
     finally:
         release.set()
+        sys.stdout, sys.stderr = original_stdout, original_stderr
+
+
+def _proxy_depth(stream) -> int:
+    """Count layers of a Hermes stdio proxy chain (outermost original included).
+
+    Walks only Hermes-owned types via direct attribute access — never a
+    forwarded ``getattr``, which on an overgrown chain is the recursion bomb
+    itself.
+    """
+    from agent.process_bootstrap import _SafeWriter
+    from hermes_logging import _RedactingStdio
+
+    depth = 0
+    while depth < 10_000:
+        depth += 1
+        if isinstance(stream, thread_output._ThreadRoutingStream):
+            stream = stream._passthrough
+        elif isinstance(stream, _SafeWriter):
+            stream = stream._inner
+        elif isinstance(stream, _RedactingStdio):
+            stream = stream._stream
+        else:
+            return depth
+    return depth
+
+
+def test_safe_stdio_and_silence_cycle_keeps_the_proxy_chain_bounded(monkeypatch):
+    """The gateway cycle — ``_install_safe_stdio()`` on every AIAgent build,
+    ``thread_scoped_silence()`` on every silenced worker — must never stack
+    proxies (#139687): the two installers used to wrap each other once per
+    cycle, and after ~500 messages any attribute lookup on ``sys.stdout``
+    died with ``RecursionError`` and the gateway stopped replying."""
+    from agent.process_bootstrap import _install_safe_stdio
+
+    monkeypatch.setattr(thread_output, "_installed", {})
+    monkeypatch.setattr(thread_output, "_sinks", {}, raising=False)
+    monkeypatch.setattr(thread_output, "_routing_states", {}, raising=False)
+    original_stdout, original_stderr = sys.stdout, sys.stderr
+    real_out = io.StringIO()
+    sys.stdout, sys.stderr = real_out, io.StringIO()
+    try:
+        for _ in range(600):
+            _install_safe_stdio()          # every AIAgent build (agent_init)
+            with thread_scoped_silence():  # every silenced background worker
+                pass
+
+        assert _proxy_depth(sys.stdout) <= 4
+        # Probing the live chain stays safe and routing still works.
+        assert getattr(sys.stdout, "line_buffering", False) is False
+        sys.stdout.write("loud-after-cycle\n")
+        with thread_scoped_silence():
+            sys.stdout.write("hidden-after-cycle\n")
+        assert "loud-after-cycle" in real_out.getvalue()
+        assert "hidden-after-cycle" not in real_out.getvalue()
+    finally:
         sys.stdout, sys.stderr = original_stdout, original_stderr

@@ -330,12 +330,62 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
         return None
 
 
+def _iter_stdio_layers(stream):  # type: ignore[no-untyped-def]
+    """Yield the layers of a Hermes-built stdio proxy chain, outermost first.
+
+    Walks only layers whose type Hermes owns (``_SafeWriter`` here; the
+    thread-routing proxy and the redacting wrapper join lazily to avoid an
+    import cycle), reading their direct attributes — never ``getattr`` through
+    an unknown ``__getattr__``, which is the recursion bomb of #139687. Stops
+    at the first foreign object (a global redirect target, a test shim, the
+    original stream).
+
+    Each installer checks its own type against the WHOLE chain before wrapping:
+    the gateway builds a fresh AIAgent per message (re-running
+    ``_install_safe_stdio``) while background workers install routing proxies,
+    so ``_SafeWriter`` and the routing proxy used to wrap each other once per
+    cycle and the chain grew until any attribute lookup died with
+    ``RecursionError``.
+    """
+    for _ in range(64):  # hard bound; a correct chain is a handful of layers
+        if stream is None:
+            return
+        yield stream
+        if isinstance(stream, _SafeWriter):
+            stream = stream._inner
+            continue
+        try:
+            from agent.thread_scoped_output import _ThreadRoutingStream
+        except ImportError:  # early boot / partial import: treat as no routing proxy
+            return
+        if isinstance(stream, _ThreadRoutingStream):
+            stream = stream._passthrough
+            continue
+        try:
+            from hermes_logging import _RedactingStdio
+        except ImportError:
+            return
+        if isinstance(stream, _RedactingStdio):
+            stream = stream._stream
+            continue
+        return
+
+
+def _stdio_chain_has(stream, *types) -> bool:
+    """True when any layer of *stream*'s proxy chain is one of *types*."""
+    return any(isinstance(layer, types) for layer in _iter_stdio_layers(stream))
+
+
 def _install_safe_stdio() -> None:
     """Wrap stdout/stderr so best-effort console output cannot crash the agent."""
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
-        if stream is not None and not isinstance(stream, _SafeWriter):
-            setattr(sys, stream_name, _SafeWriter(stream))
+        if stream is None or _stdio_chain_has(stream, _SafeWriter):
+            # Already broken-pipe-safe somewhere in the chain (possibly under a
+            # routing or redacting proxy): another ``_SafeWriter`` would only
+            # stack layers (#139687).
+            continue
+        setattr(sys, stream_name, _SafeWriter(stream))
 
 
 # Drop-in for ``openai.OpenAI``.
@@ -349,7 +399,9 @@ __all__ = [
     "_get_proxy_for_base_url",
     "_get_proxy_from_env",
     "_install_safe_stdio",
+    "_iter_stdio_layers",
     "_load_openai_cls",
+    "_stdio_chain_has",
     "build_keepalive_http_client",
     "close_shared_transports",
     "enable_happy_eyeballs_on_client",

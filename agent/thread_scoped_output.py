@@ -100,6 +100,16 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> _ThreadRoutingStream:
             return current
         if proxy is not None and current is proxy:
             return proxy
+        # Adopt a routing proxy already nested in the chain (a later wrapper
+        # such as _SafeWriter may sit on top of it): stacking a second routing
+        # proxy here is what let the chain grow unboundedly (#139687).
+        from agent.process_bootstrap import _iter_stdio_layers
+
+        for layer in _iter_stdio_layers(current):
+            if isinstance(layer, _ThreadRoutingStream):
+                _installed[attr] = layer
+                _routing_states[attr] = layer._state
+                return layer
         # Route non-silenced threads to whatever is currently bound (an active
         # global redirect keeps its old behavior).
         passthrough = current if current is not None else passthrough

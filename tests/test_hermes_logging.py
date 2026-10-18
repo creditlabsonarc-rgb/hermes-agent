@@ -11,6 +11,11 @@ from unittest.mock import patch
 
 import pytest
 
+# Import before any test binds a mock stream: the first import applies the
+# Windows UTF-8 bootstrap (hermes_bootstrap reconfigures live sys.std*), and
+# that must not fire mid-test against the mocks below.
+import agent.process_bootstrap  # applies the Windows UTF-8 bootstrap at collection, not mid-test
+
 import hermes_logging
 # Use whatever RotatingFileHandler class hermes_logging actually resolved so
 # the autouse fixture's isinstance checks (which strip rotating handlers
@@ -991,6 +996,39 @@ class TestLineBufferPipedStdout:
         # setup_logging runs per AIAgent build: a second call must not re-flush/reconfigure.
         hermes_logging.setup_logging(hermes_home=tmp_path, force=True)
         stream.reconfigure.assert_called_once_with(line_buffering=True)
+
+    def test_probe_unwraps_hermes_proxies_and_memoizes_the_original(self, monkeypatch):
+        """The memo must match the ORIGINAL stream, not a wrapper generation.
+
+        setup_logging runs on every AIAgent build while stdout may carry a new
+        proxy wrapper each time (#139687): memoizing a wrapper made every build
+        re-probe (and re-reconfigure) through the chain.
+        """
+        from agent.process_bootstrap import _SafeWriter
+
+        real = self._fake_stdout(isatty=False)
+        monkeypatch.setattr(sys, "stdout", _SafeWriter(real))
+        hermes_logging._line_buffer_piped_stdout()
+        real.reconfigure.assert_called_once_with(line_buffering=True)
+
+        # A later build binds a NEW wrapper around the same stream: the memo
+        # must hit through it — reconfigure stays called exactly once.
+        monkeypatch.setattr(sys, "stdout", _SafeWriter(_SafeWriter(real)))
+        hermes_logging._line_buffer_piped_stdout()
+        real.reconfigure.assert_called_once_with(line_buffering=True)
+
+    def test_hostile_proxy_chain_cannot_crash_agent_construction(self, monkeypatch):
+        """Buffering is observability: a stdout proxy whose attribute lookup
+        raises (the #139687 RecursionError shape) must never take down
+        setup_logging / agent construction."""
+        class Bomb:
+            def __getattr__(self, name):
+                raise RecursionError(f"proxy chain too deep to resolve {name!r}")
+
+        monkeypatch.setattr(sys, "stdout", Bomb())
+        memo_before = hermes_logging._line_buffered_stdout
+        hermes_logging._line_buffer_piped_stdout()  # must not raise
+        assert hermes_logging._line_buffered_stdout is memo_before
 
 
 class TestRolloverPreservesLogOwnership:

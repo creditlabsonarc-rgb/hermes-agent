@@ -7,7 +7,6 @@ with ``RedactingFormatter`` so secrets never reach disk.
 """
 
 import atexit
-import contextlib
 import copy
 import io
 import logging
@@ -125,23 +124,39 @@ def _line_buffer_piped_stdout() -> None:
     piped; interactive TTY stdout is already line-buffered. ACP reaches this
     too (its AIAgent calls ``setup_logging``) with stdout as its protocol
     channel — harmless, since line buffering only adds flushes at newlines.
+
+    ``sys.stdout`` may be a Hermes proxy stack (safe-writer, thread-routing,
+    redacting — #139687): probe the original stream underneath instead of
+    walking the proxy chain, and memoize THAT stream, so the memo matches on
+    every later build no matter which wrapper generation is bound. Buffering
+    is observability, not correctness — this must never crash agent
+    construction, so a hostile/foreign proxy chain (including one deep enough
+    to ``RecursionError``) only skips the tweak.
     """
     global _line_buffered_stdout
     stream = sys.stdout
-    if stream is None or stream is _line_buffered_stdout:
+    if stream is None:
         return
-    if getattr(stream, "line_buffering", False) is True:
-        _line_buffered_stdout = stream
-        return
-    reconfigure = getattr(stream, "reconfigure", None)
-    if reconfigure is None:
-        return
-    # A closed/detached stream raises ValueError / io.UnsupportedOperation (an OSError);
-    # buffering is observability, not correctness — never crash setup_logging over it.
-    with contextlib.suppress(OSError, ValueError):
-        if not stream.isatty():
+    try:
+        from agent.process_bootstrap import _iter_stdio_layers
+
+        base = stream
+        for layer in _iter_stdio_layers(stream):
+            base = layer
+        if base is _line_buffered_stdout:
+            return
+        if getattr(base, "line_buffering", False) is True:
+            _line_buffered_stdout = base
+            return
+        reconfigure = getattr(base, "reconfigure", None)
+        if reconfigure is None:
+            return
+        # A closed/detached stream raises ValueError / io.UnsupportedOperation (an OSError).
+        if not base.isatty():
             reconfigure(line_buffering=True)
-            _line_buffered_stdout = stream
+            _line_buffered_stdout = base
+    except (OSError, ValueError, RecursionError):
+        return
 
 
 def _safe_stderr():  # type: ignore[return]
