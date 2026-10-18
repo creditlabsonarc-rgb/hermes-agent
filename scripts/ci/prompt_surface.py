@@ -206,6 +206,10 @@ def render(out: Path) -> int:
             "TZ": "UTC", "LANG": "C.UTF-8", "PYTHONHASHSEED": "0", "PYTHONPATH": str(ROOT),
             "TMPDIR": tmp, "PYTHONDONTWRITEBYTECODE": "1",
         }
+        # Windows resolves Path.home() from USERPROFILE, not HOME; without it every
+        # pathlib home lookup in the child dies with "Could not determine home
+        # directory" (hermes pm repair is not the remedy). USERPROFILE is unused on POSIX.
+        env["USERPROFILE"] = str(home)
         for key in ("HERMES_RUNTIME_DIR", "SYSTEMROOT"):
             if os.environ.get(key):
                 env[key] = os.environ[key]

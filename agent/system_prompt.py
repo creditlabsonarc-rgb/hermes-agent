@@ -272,7 +272,12 @@ def _profile_name_for_home(home: Path) -> str:
 
 
 def _tool_guidance_block(agent: Any) -> Optional[str]:
-    """Tool-aware behavioral guidance, injected only when the tools are loaded."""
+    """Tool-aware behavioral guidance, injected only when the tools are loaded.
+
+    Rendered into the VOLATILE tier (see ``build_system_prompt_parts``): the gates below
+    read ``valid_tool_names``, which differs across spawns of the same conversation shape,
+    so in the stable tier the block truncated the cached prefix (#137307).
+    """
     names = agent.valid_tool_names
     # With both memory stores disabled no store is built, so the full guidance
     # would steer the model at a tool that always answers "Memory is not
@@ -557,7 +562,13 @@ def _identity_parts(agent: Any, ctx_len: Optional[int]) -> tuple[list[str], bool
 
 
 def _guidance_parts(agent: Any) -> list[str]:
-    """Universal + tool-aware + model-gated guidance blocks, each gated by its config.yaml key."""
+    """Universal + model-gated guidance blocks for the STABLE tier, each gated by its
+    config.yaml key. Toolset-gated guidance (``_tool_guidance_block``) does NOT ride
+    here: ``valid_tool_names`` varies across spawns of the same conversation shape
+    (delegate leaf children drop ``memory``; cron and kanban workers narrow too), so
+    toolset-conditional bytes in this tier broke the cached prefix at that offset for
+    every such spawn (#137307) — that block renders in the volatile tier instead.
+    """
     parts: list[str] = []
     if agent.valid_tool_names:
         parts += [
@@ -566,7 +577,6 @@ def _guidance_parts(agent: Any) -> list[str]:
                 ("_parallel_tool_call_guidance", PARALLEL_TOOL_CALL_GUIDANCE),
             ) if getattr(agent, flag, True)
         ]
-    parts.append(_tool_guidance_block(agent))  # None/empty entries are dropped by _join_tier
     if not agent.valid_tool_names:
         return parts
     # Steering only lands inside tool results, so only reachable with tools.
@@ -735,12 +745,12 @@ def _join_tier(parts: list[Optional[str]]) -> str:
 
 def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> dict[str, str]:
     """Assemble the system prompt as three ordered cache tiers: ``stable`` (identity,
-    guidance and the coding brief), ``context`` (caller ``system_message``, project
-    context files, workspace snapshot and remaining workspace guidance) and
-    ``volatile`` (skills index, memory, user profile, external memory block,
-    timestamp line, runtime environment hints).  Worktree-dependent blocks follow project context so a
-    shared context file can remain in the longest common prefix across worktrees.
-    Never re-rendered mid-session."""
+    universal/model guidance and the coding brief), ``context`` (caller ``system_message``,
+    project context files, workspace snapshot and remaining workspace guidance) and
+    ``volatile`` (skills index, toolset-gated guidance, memory, user profile, external
+    memory block, timestamp line, runtime environment hints).  Worktree-dependent blocks
+    follow project context so a shared context file can remain in the longest common prefix
+    across worktrees.  Never re-rendered mid-session."""
     # Model context window scales the context-file caps; stable per conversation.
     _cc_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)
     _ctx_len = _cc_len if isinstance(_cc_len, int) and _cc_len > 0 else None
@@ -782,7 +792,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Volatile tier (most likely to differ on a rebuild; kept last so the stable prefix stays reusable) ──
     # Skills are runtime-mutable, so the index leads the volatile band: on a longest-prefix
     # backend an unchanged index stays inside the reused prefix; a changed one re-prefills from here.
-    volatile_parts: list[str] = [skills_prompt, *_memory_parts(agent)]
+    # The toolset-gated guidance block follows the index: its content depends on
+    # ``valid_tool_names``, which varies across spawns of one conversation (delegate leaf
+    # children drop ``memory``; cron/kanban workers narrow too), so it must never sit in the
+    # stable tier — there it truncated the cached prefix at its offset for every such spawn
+    # (#137307). In the volatile band the block stays toolset-correct and only the tail re-prefills.
+    volatile_parts: list[str] = [skills_prompt, _tool_guidance_block(agent), *_memory_parts(agent)]
     # Plugin sections are confined to one coarse anchor in the volatile tail so
     # a resumed process can reconstruct the stable prefix without re-running plugins.
     volatile_parts.extend(_plugin_section_blocks(_frozen_plugin_prompt_sections(agent), "after_memory"))
