@@ -28,9 +28,9 @@ Primary files:
 
 The cached system prompt is assembled as three ordered tiers (see `agent/system_prompt.py`):
 
-1. **stable** — identity (`SOUL.md` or fallback), tool/model guidance, coding operating brief
+1. **stable** — identity (`SOUL.md` or fallback), universal/model guidance, coding operating brief
 2. **context** — caller-supplied `system_message`, project context files (`.hermes.md` / `AGENTS.md` / `CLAUDE.md` / `.cursorrules`), then the worktree-dependent git workspace snapshot, operator instructions and platform hints
-3. **volatile** — skills index, built-in memory snapshot (`MEMORY.md`), user profile snapshot (`USER.md`), external memory-provider block, timestamp/session/model/provider line, then runtime environment hints (host / home / **current working directory**)
+3. **volatile** — skills index, toolset-gated guidance (memory / session_search / skills / kanban blocks), built-in memory snapshot (`MEMORY.md`), user profile snapshot (`USER.md`), external memory-provider block, timestamp/session/model/provider line, then runtime environment hints (host / home / **current working directory**)
 
 The final system prompt is then joined as: `stable` → `context` → `volatile`.
 
@@ -38,6 +38,13 @@ This ordering matters for precedence discussions:
 - skills are part of the **stable** tier
 - memory/profile snapshots are part of the **volatile** tier
 - both are still in the cached system prompt (they are not injected as ad-hoc mid-turn overlays)
+
+The toolset-gated guidance block renders in the **volatile** tier on purpose: its content is
+gated on `valid_tool_names`, which differs across spawns of the same conversation shape
+(delegate leaf children drop `memory`; cron and kanban workers narrow their toolsets too).
+In the stable tier those conditional bytes truncated the cached prefix at the block's offset
+for every restricted spawn (#137307); in the volatile band the guidance stays toolset-correct
+and only the tail re-prefills.
 
 Inside the context tier the shared project files come **before** anything naming the current worktree.
 Sessions of one project running in different git worktrees then share a prompt prefix covering the whole

@@ -126,6 +126,33 @@ def test_memory_guidance_respects_available_writes(stores, names, monkeypatch, t
         assert "never target='memory'" in prompt
 
 
+def test_toolset_variation_stays_out_of_the_stable_tier(monkeypatch, tmp_path):
+    """Spawns of one conversation shape with different toolsets share the stable tier.
+
+    Delegate leaf children drop ``memory``; cron and kanban-worker spawns narrow
+    their toolsets too. With the toolset-gated guidance block in the stable tier,
+    every such spawn truncated the cached prefix at the block's offset (#137307);
+    the block renders in the volatile tier, so the guidance stays toolset-correct
+    while the reusable prefix stays byte-identical.
+    """
+    monkeypatch.chdir(tmp_path)
+    full = _make_agent(
+        valid_tool_names={"memory", "session_search", "skill_manage", "kanban_show"},
+        skip_context_files=True,
+    )
+    narrow = _make_agent(
+        # Same conversation shape, minus memory (the delegate-leaf case).
+        valid_tool_names={"session_search", "skill_manage", "kanban_show"},
+        skip_context_files=True,
+    )
+    parts_full = build_system_prompt_parts(full)
+    parts_narrow = build_system_prompt_parts(narrow)
+    assert parts_full["stable"] == parts_narrow["stable"]
+    # The gated guidance is still rendered, toolset-correct, in the volatile tier.
+    assert "Memory is the narrow exception" in parts_full["volatile"]
+    assert "Memory is the narrow exception" not in parts_narrow["volatile"]
+
+
 class TestContextFileCwd:
     def test_none_when_terminal_cwd_unset(self, monkeypatch):
         # Unset → None, so discovery falls back to the launch dir inside
