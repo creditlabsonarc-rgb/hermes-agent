@@ -69,6 +69,34 @@ class TestPluginRerenderFailOpen(unittest.TestCase):
         self.assertEqual(rendered, ())
 
 
+def _can_symlink():
+    """Check if we can create symlinks (needs admin/dev-mode on Windows)."""
+    import tempfile
+    from pathlib import Path
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "src"
+            src.write_text("x", encoding="utf-8")
+            (Path(d) / "lnk").symlink_to(src)
+            return True
+    except OSError:
+        return False
+
+
+def _rmtree(path):
+    """Remove a tree that must be recreated at the same path: git leaves loose objects
+    read-only and Windows ``shutil.rmtree`` refuses them without a chmod first."""
+    import os
+    import shutil
+    import stat
+
+    def _onerror(func, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    shutil.rmtree(path, onerror=_onerror)
+
+
 def _init_repo(path, first_commit):
     import subprocess
     path.mkdir()
@@ -255,6 +283,7 @@ class TestWorkspaceSnapshotPinnedAcrossCompaction(unittest.TestCase):
             os.chdir(old_cwd)
             shutil.rmtree(tmp, ignore_errors=True)
 
+    @pytest.mark.skipif(not _can_symlink(), reason="Symlinks need elevated privileges")
     def test_symlink_spelling_of_the_launch_dir_replays_the_pin(self):
         """The macOS shape on any POSIX host: os.getcwd() reports the physical dir while the bound
         cwd arrives through a symlink (/var -> /private/var). Same workspace, so the pin must hit."""
@@ -385,6 +414,7 @@ class TestWorkspaceSnapshotPinnedAcrossCompaction(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    @pytest.mark.skipif(not _can_symlink(), reason="Symlinks need elevated privileges")
     def test_loop_cwd_spelling_in_persisted_bytes_cannot_drop_the_coding_block(self):
         """A symlink loop in persisted session bytes (the Current working directory hint or a
         ``- Root:`` line) makes Path.resolve raise RuntimeError on Python <= 3.12; the pin
@@ -454,6 +484,7 @@ class TestWorkspaceSnapshotPinnedAcrossCompaction(unittest.TestCase):
         captured.symlink_to(other, target_is_directory=True)
         return saved
 
+    @pytest.mark.skipif(not _can_symlink(), reason="Symlinks need elevated privileges")
     def test_rebound_path_cannot_replay_the_captured_snapshot(self):
         """Capturing in physical A, renaming it and reusing the pathname A as a symlink to
         independent repo B, then binding B: today's resolution of the captured key lands on
@@ -660,7 +691,7 @@ class TestWorkspaceSnapshotPinnedAcrossCompaction(unittest.TestCase):
                  patch("agent.system_prompt.resolve_context_cwd", return_value=repo):
                 stored = build_system_prompt(self._pin_agent())
                 self.assertIn("init captured", stored)
-            shutil.rmtree(repo)
+            _rmtree(repo)
             _init_repo(tmp / "proj", "init replaced")
             db = SimpleNamespace(get_session=lambda sid: {"system_prompt": stored})
             with patch("agent.prompt_builder.load_soul_md", return_value=""), env(repo), \
@@ -692,7 +723,7 @@ class TestWorkspaceSnapshotPinnedAcrossCompaction(unittest.TestCase):
                 build_system_prompt(agent)
                 pin = agent._frozen_workspace_snapshot
                 self.assertEqual(pin[1], "")
-            shutil.rmtree(plain)
+            _rmtree(plain)
             _init_repo(tmp / "plain", "init replaced")
             # The recycled-identity shape the gate must survive: the new occupant stats
             # to the recorded (st_dev, st_ino) pair.
@@ -724,7 +755,7 @@ class TestWorkspaceSnapshotPinnedAcrossCompaction(unittest.TestCase):
                 "# Agent notes\n\n"
                 f"{WORKSPACE_BLOCK_HEADER}\n"
                 f"- Root: {repo.resolve()}\n"
-                "- Status: FAKE-CONTEXT\n")
+                "- Status: FAKE-CONTEXT\n", encoding="utf-8")
             # Commit so the canonical snapshot reads a clean worktree.
             subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "-qm", "add agents notes"], cwd=repo, check=True)
