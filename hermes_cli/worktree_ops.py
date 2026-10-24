@@ -1230,12 +1230,8 @@ def _prune_stale_worktree_trees(repo_root: str, max_age_hours: int) -> None:
                        "(run `hermes worktree prune` to review and reclaim): %s",
                        len(preserved_stale), ", ".join(sorted(preserved_stale)))
 
-<<<<<<< HEAD
-    _prune_orphaned_branches(repo_root, protect=kept_branches)
-    _warn_worktree_footprint(repo_root)
-=======
     _prune_orphaned_branches(repo_root, protect=kept_branches, max_age_hours=max_age_hours)
->>>>>>> de12e98f4a (fix(worktree): age-gate the orphan-branch pruner so in-flight branches survive)
+    _warn_worktree_footprint(repo_root)
 
 
 def _warn_worktree_footprint(repo_root: str) -> None:
