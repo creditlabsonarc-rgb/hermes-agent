@@ -357,7 +357,7 @@ class TestRunJobScript:
             sys.executable, {"VIRTUAL_ENV": str(venv)}, str(script)
         )
         result = subprocess.run(
-            argv, capture_output=True, timeout=30,
+            argv, check=False, capture_output=True, timeout=30,
             text=True, encoding="utf-8", errors="replace")
         assert result.returncode == 0, result.stderr
         # The thread joined cleanly and the pickle succeeded; the runpy form fails with
@@ -393,7 +393,7 @@ class TestRunJobScript:
         for probe, expected in ((pyz, "ZIPAPP-RAN"), (pyc, "BYTECODE-RAN")):
             argv = _windows_cron_bootstrap_argv(sys.executable, overlay, str(probe))
             result = subprocess.run(
-                argv, capture_output=True, timeout=30,
+                argv, check=False, capture_output=True, timeout=30,
                 text=True, encoding="utf-8", errors="replace")
             assert result.returncode == 0, (probe.name, result.stderr)
             assert result.stdout.strip() == expected, (
