@@ -666,7 +666,7 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
             advice="Find an alternative approach that avoids this command.")}
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
-    if is_dangerous and not _is_permanently_approved(pattern_key):
+    if is_dangerous:
         result = block(f"Command flagged as dangerous ({description})")
         if ctx.name == "single_query":
             result.update(pattern_key=pattern_key, description=description)
@@ -1105,7 +1105,7 @@ def check_dangerous_command(command: str, env_type: str,
         return blocked
     if _yolo_active():
         return _approved()
-    if _command_matches_permanent_allowlist(command):
+    if _command_matches_permanent_allowlist(command) and not _unattended_contexts():
         return _approved()
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
     if not is_dangerous:
@@ -1169,7 +1169,7 @@ def check_all_command_guards(command: str, env_type: str,
     approval_mode = approval_context._get_approval_mode()
     if _yolo_active() or approval_mode == "off":
         return _approved()
-    if _command_matches_permanent_allowlist(command):
+    if _command_matches_permanent_allowlist(command) and not _unattended_contexts():
         return _approved()
 
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
