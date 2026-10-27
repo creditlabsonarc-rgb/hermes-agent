@@ -463,6 +463,16 @@ _PYTHON_REPR_SECRET_KEYS = frozenset({
     "raw_secret",
     "secret_input",
     "key_material",
+    "aws_secret_access_key",
+    "secret_access_key",
+    "secret_key",
+    "secretaccesskey",
+    "secretkey",
+    "privatekey",
+    "signing_key",
+    "encryption_key",
+    "master_key",
+    "hmac_key",
 })
 _PYTHON_REPR_ENV_SUFFIXES = (
     "_API_KEY",
@@ -487,7 +497,6 @@ _PYTHON_REPR_CREDENTIAL_SUFFIXES = (
     "passwd",
     "credential",
     "credentials",
-    "key",
 )
 _PYTHON_REPR_FIELD_RE = re.compile(
     r"'(?P<key>[A-Za-z_][A-Za-z0-9_]*)'(?P<sep>\s*:\s*)"
