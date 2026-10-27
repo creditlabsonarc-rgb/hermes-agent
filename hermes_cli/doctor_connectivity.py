@@ -32,6 +32,20 @@ class ProbeResult(NamedTuple):
 _GLYPH = {"ok": ("✓", Colors.GREEN), "warn": ("⚠", Colors.YELLOW), "fail": ("✗", Colors.RED)}
 
 
+
+def _sanitize_probe_error(exc):
+    """Return a diagnostic message that never echoes credential material.
+
+    httpx rejects malformed header values (e.g. an API key with an embedded line
+    break) with an exception whose ``str()`` contains the offending value. Doctor
+    must explain the formatting problem without printing the secret.
+    """
+    text = str(exc).lower()
+    if "invalid" in text and ("header" in text or "value" in text):
+        return "malformed API key (contains invalid characters)"
+    return "connection failed"
+
+
 def _row(name: str, status: str, detail: str = "", issues: list | None = None, label: str | None = None) -> ProbeResult:
     glyph, col = _GLYPH[status]
     return ProbeResult(name, [(color(glyph, col), name if label is None else label, color(detail, Colors.DIM) if detail else "")],
@@ -142,7 +156,7 @@ def _probe_openrouter() -> ProbeResult:
         import httpx
         r = httpx.get(OPENROUTER_MODELS_URL, headers={"Authorization": f"Bearer {key}"}, timeout=10)
     except Exception as e:
-        return _row(name, "fail", f"({e})", ["Check network connectivity"])
+        return _row(name, "fail", f"({_sanitize_probe_error(e)})", ["Check network connectivity"])
     if r.status_code == 200:
         return _row(name, "ok")
     detail, issue = _OPENROUTER_STATUS.get(r.status_code, (f"(HTTP {r.status_code})", None))
@@ -170,7 +184,7 @@ def _probe_anthropic() -> ProbeResult:
             headers["anthropic-beta"] = ",".join([b for b in _COMMON_BETAS if b != _CONTEXT_1M_BETA] + list(_OAUTH_ONLY_BETAS))
             r = httpx.get(url, headers=headers, timeout=10)
     except Exception as e:
-        return _row(name, "warn", f"({e})")
+        return _row(name, "warn", f"({_sanitize_probe_error(e)})")
     return _row(name, *{200: ("ok",), 401: ("fail", "(invalid API key)")}.get(r.status_code, ("warn", "(couldn't verify)")))
 
 
@@ -196,7 +210,7 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
         if pname == "Alibaba/DashScope" and not base and r.status_code == 401:
             r = httpx.get("https://dashscope.aliyuncs.com/compatible-mode/v1/models", headers=headers, timeout=10)
     except Exception as e:
-        return _row(pname, "warn", f"({e})", label=label)
+        return _row(pname, "warn", f"({_sanitize_probe_error(e)})", label=label)
     if r.status_code == 401:
         return _row(pname, "fail", "(invalid API key)", [f"Check {env_vars[0]} in .env"], label=label)
     return _row(pname, "ok", label=label) if r.status_code == 200 else _row(pname, "warn", f"(HTTP {r.status_code})", label=label)
@@ -398,7 +412,7 @@ def _probe_github_token() -> ProbeResult:
             "Authorization": f"Bearer {get_env_value(var)}", "User-Agent": _HERMES_USER_AGENT,
             "Accept": "application/vnd.github+json"})
     except Exception as e:
-        return _row(name, "fail", f"({e})", ["Check network connectivity"])
+        return _row(name, "fail", f"({_sanitize_probe_error(e)})", ["Check network connectivity"])
     if r.status_code == 200:
         return _row(name, "ok", f"({var} from {where} accepted by api.github.com)")
     if r.status_code == 401:
