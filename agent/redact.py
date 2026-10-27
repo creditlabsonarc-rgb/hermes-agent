@@ -472,6 +472,7 @@ _PYTHON_REPR_ENV_SUFFIXES = (
     "_PASSWD",
     "_CREDENTIAL",
     "_CREDENTIALS",
+    "_KEY",
 )
 # Casefolded credential suffixes for mixed/camel-case key names
 # (``UserPassword``, ``sessionToken``, ``clientApiKey``). Suffix-only so
@@ -486,6 +487,7 @@ _PYTHON_REPR_CREDENTIAL_SUFFIXES = (
     "passwd",
     "credential",
     "credentials",
+    "key",
 )
 _PYTHON_REPR_FIELD_RE = re.compile(
     r"'(?P<key>[A-Za-z_][A-Za-z0-9_]*)'(?P<sep>\s*:\s*)"
