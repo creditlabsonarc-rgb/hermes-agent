@@ -291,18 +291,56 @@ def synthetic_features(t, bpm=120):
 
 ## TTS Integration
 
-For narrated videos (testimonials, quotes, storytelling), generate speech audio per segment and mix with background music.
+For narrated videos (testimonials, quotes, storytelling), generate speech audio per segment and mix with background music. Each caller exclusively owns its clip output and adjacent `<output>.part` name; no two writers may share either name, and the parent directory must already exist.
+
+### TTS Prerequisites and Publication Contract
+
+In the project's own activated Python environment (not Hermes's managed environment), install the transport required by this example:
+
+```bash
+python -m pip install 'requests>=2.30,<3' 'urllib3>=2,<3'
+```
+
+The streaming example requires requests >=2.30,<3 with urllib3 2.x, whose strict HTTP length handling rejects a prematurely ended `Content-Length` body. Requests alone also permits urllib3 1.x, so do not rely on its unconstrained transitive version; the download branch rejects unsupported versions before contacting the provider. NumPy and ffmpeg are also required for the audio pipeline (see the skill's existing prerequisites). No provider request is needed to install or verify these local dependencies. Cache hits do not need a network-compatible transport and return before this version gate.
+
+A failed or abruptly interrupted download may leave `<output>.part`, never a newly published final clip. The next single-writer attempt discards that caller-owned regular `.part` file and recreates it; `.part` is not a reusable clip or a resumed/ranged download. Successful publication preserves an existing ordinary clip's mode and requires it to be writable by this process; new files use the normal creation umask. Privileged callers may still write mode-0444 files. Non-regular/special-mode download destinations are refused rather than followed or reinterpreted. The caller must exclusively own both path lifetimes, including any previous `.part`; this is not an ACL/owner migration or a concurrent-writer protocol.
+
+The `>1000`-byte skip remains only the old cache heuristic. Older final files are not revalidated: a truncated clip published by an older version can still be skipped. If an old clip is suspect, the caller must deliberately choose a new output path or explicitly regenerate it; this example does not automatically redownload old clips. Only newly received responses with successful HTTP framing are covered; this is neither audio/playability validation nor crash-durable storage. An origin that supplies no checkable length may still end an incomplete audio payload with an otherwise valid HTTP response.
 
 ### ElevenLabs Voice Generation
 
 ```python
-import requests, time, os
+import os, requests, stat, time, urllib3
+
 
 def generate_tts(text, voice_id, api_key, output_path, model="eleven_multilingual_v2"):
-    """Generate TTS audio via ElevenLabs API. Streams response to disk."""
-    # Skip if already generated (idempotent re-runs)
+    """Receive a complete response before publishing a caller-owned clip."""
+    output_path = os.fspath(output_path)
+    # Compatibility cache heuristic, NOT validation of an older clip's contents.
     if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
         return
+    try:
+        previous = os.lstat(output_path)
+    except FileNotFoundError:
+        previous = None
+    if previous is not None:
+        if not stat.S_ISREG(previous.st_mode) or previous.st_mode & 0o7000:
+            raise ValueError("clip output must be an ordinary regular file")
+        if not os.access(output_path, os.W_OK):
+            raise PermissionError("existing clip output is not writable")
+    requests_version = tuple(int(part) for part in requests.__version__.split(".")[:2])
+    if not (2, 30) <= requests_version < (3, 0) or urllib3.__version__.split(".", 1)[0] != "2":
+        raise RuntimeError("TTS downloads require requests>=2.30,<3 and urllib3 2.x; see TTS prerequisites")
+
+    part_path = output_path + ".part"  # this caller exclusively owns BOTH names
+    try:
+        part = os.lstat(part_path)
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(part.st_mode) or part.st_mode & 0o7000:
+            raise ValueError("reserved .part path must be an ordinary regular file")
+        os.unlink(part_path)  # discard only this caller's previous incomplete attempt
 
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
@@ -316,12 +354,15 @@ def generate_tts(text, voice_id, api_key, output_path, model="eleven_multilingua
             "use_speaker_boost": True,
         },
     }
-    resp = requests.post(url, json=data, headers=headers, stream=True)
-    resp.raise_for_status()
-    with open(output_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=4096):
-            f.write(chunk)
-    time.sleep(0.3)  # rate limit: avoid 429s on batch generation
+    with requests.post(url, json=data, headers=headers, stream=True) as resp:
+        resp.raise_for_status()
+        with open(part_path, "xb") as f:  # fresh creation follows the current umask
+            for chunk in resp.iter_content(chunk_size=4096):
+                f.write(chunk)
+    if previous is not None:
+        os.chmod(part_path, stat.S_IMODE(previous.st_mode))
+    os.replace(part_path, output_path)  # only after both contexts exited successfully
+    time.sleep(0.3)  # unchanged rate limit; no automatic retries
 ```
 
 Voice settings notes:
@@ -401,73 +442,61 @@ QUOTES_TTS = [
 ### Audio Pipeline
 
 1. Generate individual TTS clips (MP3 per quote, skipping existing)
-2. Convert each to WAV (mono, 22050 Hz) for duration measurement and concatenation
+2. Decode each directly from ffmpeg stdout to mono s16le at 22050 Hz; no source-side WAV or ffprobe
 3. Calculate timing: intro pad + speech + gaps + outro pad = target duration
-4. Concatenate into single TTS track with silence padding
+4. Concatenate into the caller's required `output_path` WAV with silence padding and final target-duration trim; quote timing follows decoded sample counts
 5. Mix with background music
 
 ```python
-def build_tts_track(tts_clips, target_duration, intro_pad=5.0, outro_pad=4.0):
-    """Concatenate TTS clips with calculated gaps, pad to target duration.
+import os, subprocess, wave
+import numpy as np
 
-    Returns:
-        timing: list of (start_time, end_time, quote_index) tuples
+
+def build_tts_track(tts_clips, target_duration, output_path, intro_pad=5.0, outro_pad=4.0):
+    """Decode clips to PCM, place them on a sample timeline, and write caller's WAV.
+
+    Returns timing = [(t_start, t_end, quote_index), ...] before final pad/trim.
+    Choose a target long enough for all speech if every quote must remain audible.
     """
     sr = 22050
-
-    # Convert MP3s to WAV for duration and sample-level concatenation
-    durations = []
-    for clip in tts_clips:
-        wav = clip.replace(".mp3", ".wav")
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", clip, "-ac", "1", "-ar", str(sr),
-             "-sample_fmt", "s16", wav],
-            capture_output=True, check=True)
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", wav],
-            capture_output=True, text=True)
-        durations.append(float(result.stdout.strip()))
-
-    # Calculate gap to fill target duration
-    total_speech = sum(durations)
-    n_gaps = len(tts_clips) - 1
-    remaining = target_duration - total_speech - intro_pad - outro_pad
-    gap = max(1.0, remaining / max(1, n_gaps))
-
-    # Build timing and concatenate samples
-    timing = []
-    t = intro_pad
-    all_audio = [np.zeros(int(sr * intro_pad), dtype=np.int16)]
-
-    for i, dur in enumerate(durations):
-        wav = tts_clips[i].replace(".mp3", ".wav")
-        with wave.open(wav) as wf:
-            samples = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
-        timing.append((t, t + dur, i))
-        all_audio.append(samples)
-        t += dur
-        if i < len(tts_clips) - 1:
-            all_audio.append(np.zeros(int(sr * gap), dtype=np.int16))
-            t += gap
-
-    all_audio.append(np.zeros(int(sr * outro_pad), dtype=np.int16))
-
-    # Pad or trim to exactly target_duration
-    full = np.concatenate(all_audio)
     target_samples = int(sr * target_duration)
+    audio_data = []
+    for clip in tts_clips:
+        pcm = subprocess.run([
+            "ffmpeg", "-nostdin", "-y", "-i", os.fspath(clip),
+            "-f", "s16le", "-ac", "1", "-ar", str(sr), "-",
+        ], capture_output=True, check=True).stdout
+        audio_data.append(np.frombuffer(pcm, dtype="<i2"))
+    durations = [len(samples) / sr for samples in audio_data]
+    total_speech = sum(durations)
+    remaining = target_duration - intro_pad - outro_pad - total_speech
+    gap = max(1.0, remaining / max(1, len(tts_clips) - 1))
+
+    timing = []
+    intro_samples = int(sr * intro_pad)
+    gap_samples = int(sr * gap)
+    all_audio = [np.zeros(intro_samples, dtype="<i2")]
+    cursor = intro_samples
+    for i, samples in enumerate(audio_data):
+        start = cursor / sr
+        all_audio.append(samples)
+        cursor += len(samples)
+        timing.append((start, cursor / sr, i))
+        if i < len(audio_data) - 1:
+            all_audio.append(np.zeros(gap_samples, dtype="<i2"))
+            cursor += gap_samples
+    all_audio.append(np.zeros(int(sr * outro_pad), dtype="<i2"))
+    full = np.concatenate(all_audio)
     if len(full) < target_samples:
         full = np.pad(full, (0, target_samples - len(full)))
     else:
         full = full[:target_samples]
 
-    # Write concatenated TTS track
-    with wave.open("tts_full.wav", "w") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(full.tobytes())
-
+    with wave.open(os.fspath(output_path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(full.astype("<i2", copy=False).tobytes())
     return timing
 ```
 
@@ -502,6 +531,15 @@ def mix_audio(tts_path, bgm_path, output_path, bgm_volume=0.15):
         "-map", "[out]", output_path,
     ]
     subprocess.run(cmd, capture_output=True, check=True)
+```
+
+### Caller-Owned Audio Outputs
+
+`tts_output_path`, `mixed_output_path`, and the clip paths are chosen by the caller in its own output area, distinct from source media. Pass the narration path explicitly into both stages; there is no implicit `tts_full.wav`. The WAV remains the caller's output, not a helper-owned temporary file. The returned quote timing is the pre-trim placement; choose a target long enough for all speech if every quote must remain audible. Existing minimum-gap and final pad/trim behavior are unchanged.
+
+```python
+timing = build_tts_track(tts_clips, target_duration, tts_output_path)
+mix_audio(tts_output_path, bgm_path, mixed_output_path)
 ```
 
 ### Per-Quote Visual Style
