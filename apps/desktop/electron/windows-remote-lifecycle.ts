@@ -23,6 +23,10 @@ function powerShellCommand(script) {
   return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedPowerShell(script)}`
 }
 
+function powerShellStdinCommand() {
+  return 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -'
+}
+
 // Windows OpenSSH may serialize PowerShell's progress stream as
 // "#< CLIXML <Objs ...>...</Objs>" blocks into the captured stdout of ANY
 // PowerShell exec on the connection (module auto-load / Add-Type cold-start
@@ -314,7 +318,7 @@ async function assertWindowsRemoteInstallUpdateClear(ssh, hermesHome, python = '
     // CLEAR gate into a fail-closed 'update-in-progress' verdict.
     observation =
       stripPowerShellNoise(
-        await ssh.exec(compressedPowerShellCommand(windowsUpdateMarkerProbeScript(hermesHome, python)))
+        await ssh.exec(powerShellStdinCommand(), { stdinData: windowsUpdateMarkerProbeScript(hermesHome, python) })
       ).pop() || ''
   } catch (cause) {
     const error: any = new Error('Could not prove that the remote Hermes install is clear for SSH startup.')
