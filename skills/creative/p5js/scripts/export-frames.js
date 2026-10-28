@@ -56,9 +56,14 @@ function parseArgs() {
     fps: 30,
     wait: 2000,
     selector: 'canvas',
+    unsafe: false,
   };
 
   for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--unsafe') {
+      opts.unsafe = true;
+      continue;
+    }
     if (args[i].startsWith('--')) {
       const key = args[i].slice(2);
       const val = args[i + 1];
@@ -95,16 +100,13 @@ async function main() {
   console.log(`Resolution: ${opts.width}x${opts.height}`);
   console.log(`Output: ${opts.output}/`);
 
+  const launchArgs = ['--disable-gpu', '--disable-dev-shm-usage'];
+  if (opts.unsafe) {
+    launchArgs.push('--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--allow-file-access-from-files');
+  }
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-gpu',
-      '--disable-dev-shm-usage',
-      '--disable-web-security',
-      '--allow-file-access-from-files',
-    ],
+    args: launchArgs,
   });
 
   const page = await browser.newPage();
