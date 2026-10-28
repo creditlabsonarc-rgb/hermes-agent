@@ -243,6 +243,19 @@ def _process_single_prompt(
     if failure is not None:
         return failure
 
+    # Batch runs are unattended: no human can answer an approval prompt, so bind the
+    # cron approval context (deny by default) and mark the turn non-interactive.
+    # Otherwise interactive tools block for the full approval timeout (#144553).
+    import os as _os
+    _os.environ.setdefault("HERMES_CRON_SESSION", "1")
+    _approval_tokens = None
+    try:
+        from tools.approval_context import set_current_session_key, set_hermes_interactive_context
+        _approval_tokens = (set_current_session_key(f"batch:{batch_num}:{prompt_index}"),
+                            set_hermes_interactive_context(False))
+    except Exception:
+        _approval_tokens = None
+
     try:
         selected_toolsets = sample_toolsets_from_distribution(config["distribution"])
 
@@ -278,6 +291,12 @@ def _process_single_prompt(
             # batch's whole run (#50197).
             with contextlib.suppress(Exception):
                 agent.close()
+            # Restore approval context bindings.
+            if _approval_tokens is not None:
+                with contextlib.suppress(Exception):
+                    from tools.approval_context import reset_current_session_key, reset_hermes_interactive_context
+                    reset_hermes_interactive_context(_approval_tokens[1])
+                    reset_current_session_key(_approval_tokens[0])
 
         return {
             "success": True,
