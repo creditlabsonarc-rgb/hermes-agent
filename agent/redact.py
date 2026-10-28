@@ -463,6 +463,16 @@ _PYTHON_REPR_SECRET_KEYS = frozenset({
     "raw_secret",
     "secret_input",
     "key_material",
+    "aws_secret_access_key",
+    "secret_access_key",
+    "secret_key",
+    "secretaccesskey",
+    "secretkey",
+    "privatekey",
+    "signing_key",
+    "encryption_key",
+    "master_key",
+    "hmac_key",
 })
 _PYTHON_REPR_ENV_SUFFIXES = (
     "_API_KEY",
@@ -472,6 +482,7 @@ _PYTHON_REPR_ENV_SUFFIXES = (
     "_PASSWD",
     "_CREDENTIAL",
     "_CREDENTIALS",
+    "_KEY",
 )
 # Casefolded credential suffixes for mixed/camel-case key names
 # (``UserPassword``, ``sessionToken``, ``clientApiKey``). Suffix-only so
@@ -523,7 +534,7 @@ _SECRET_HEADER_RE = re.compile(rf"({_SECRET_HEADER_NAMES}\s*:\s*)(\S+)", re.IGNO
 # quadratic, one core at 100% for hours while holding the GIL.
 _TELEGRAM_RE = re.compile(r"(?<!\d)(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})")
 
-_PRIVATE_KEY_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----")
+_PRIVATE_KEY_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY[A-Z ]*-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY[A-Z ]*-----")
 
 # Database connection strings: protocol://user:PASSWORD@host. The userinfo and
 # password groups forbid whitespace so a match can never span a line break (a
@@ -974,6 +985,11 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
 
     if "BEGIN" in text and "-----" in text:
         text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+
+    # Other common private-key formats that are not PEM-armored (#144023).
+    text = re.sub(r"AGE-SECRET-KEY-1[A-Z0-9]+", "AGE-SECRET-KEY-***", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?im)^\s*client-key-data:\s*.+$", "client-key-data: ***", text)
+    text = re.sub(r"(Private-Lines:\s*\d+\s*\n)(?:[A-Za-z0-9+/=]+\s*\n)+", r"\1[REDACTED]\n", text)
 
     # Database connection string passwords. With code_file=True, a password group that is a pure ``{...}``
     # brace expression is an f-string template reference (e.g. f"postgresql://{user}:{pass}@{host}"), not a
